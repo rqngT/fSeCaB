@@ -1,24 +1,24 @@
-# --- CONFIG ---
+# PowerShell 7+ parallel scanner — rezultat drukowany na konsoli po skanowaniu
+# --- KONFIG ---
 $basePrefix = "192.168.122."
 $lastOctets = 1..254
 $ports = 22,23,80,443,9100
 $timeoutMs = 150
-$throttle = 50             # how many parallel tasks at once (adjust to your system/network)
-$outCsv = "scan_results_parallel.csv"
+$throttle = 200    # dostosuj do zasobów / sieci
 
+# Przygotowanie
 $ips = $lastOctets | ForEach-Object { "$basePrefix$_" }
-
-# Use a thread-safe collection (ConcurrentQueue style) to collect results
 $results = [System.Collections.Concurrent.ConcurrentBag[object]]::new()
+$sw = [Diagnostics.Stopwatch]::StartNew()
 
-$scriptBlock = {
-    param($ip, $ports, $timeoutMs, $results)
-
-    foreach ($port in $ports) {
-        $tcp = New-Object System.Net.Sockets.TcpClient
+# Równoległy skan — logika bezpośrednio w bloku -Parallel
+$ips | ForEach-Object -Parallel {
+    $ip = $_
+    foreach ($port in $using:ports) {
+        $tcp = [System.Net.Sockets.TcpClient]::new()
         try {
             $task = $tcp.ConnectAsync($ip, [int]$port)
-            $success = $task.Wait($timeoutMs)
+            $success = $task.Wait($using:timeoutMs)
             if ($success -and $tcp.Connected) {
                 $obj = [PSCustomObject]@{
                     Host  = $ip
@@ -26,28 +26,34 @@ $scriptBlock = {
                     State = "Open"
                     Time  = (Get-Date).ToString("s")
                 }
-                $results.Add($obj)
-                Write-Output "$ip port $port Open"
-            } else {
-                # optionally silent for closed ports to reduce noise
-                # Write-Output "$ip port $port Closed/Timeout"
+                $using:results.Add($obj)
+                # nie piszemy tutaj dużo na konsolę, żeby nie zaśmiecać podczas skanowania
             }
         } catch {
-            # handle/ignore
+            # ignoruj błędy jeśli chcesz; możesz dodać logowanie
         } finally {
             try { $tcp.Close(); $tcp.Dispose() } catch {}
         }
     }
-}
-
-$ips | ForEach-Object -Parallel {
-    & $using:scriptBlock -ip $_ -ports $using:ports -timeoutMs $using:timeoutMs -results $using:results
 } -ThrottleLimit $throttle
 
-# Export results
-if ($results.Count -gt 0) {
-    $results | Sort-Object Host, Port | Export-Csv -Path $outCsv -NoTypeInformation -Force
-    Write-Host "Saved results to $outCsv"
+$sw.Stop()
+
+# Pobierz i posortuj wyniki
+$resultsArray = $results.ToArray() | Sort-Object Host, Port
+
+# Wyświetl ładne podsumowanie i tabelę wyników
+Write-Host ""
+Write-Host "=== Scan summary ==="
+Write-Host ("Targets scanned: {0}  Ports per host: {1}  Timeout(ms): {2}" -f ($ips.Count), ($using:ports.Count), $timeoutMs)
+Write-Host ("Elapsed time: {0:hh\:mm\:ss} (hh:mm:ss)" -f $sw.Elapsed)
+Write-Host ("Open endpoints found: {0}" -f $resultsArray.Count)
+Write-Host "===================="
+Write-Host ""
+
+if ($resultsArray.Count -gt 0) {
+    # Przyjazna tabela: Host | Port | State | Time
+    $resultsArray | Format-Table @{Label="Host";Expression={$_.Host}}, @{Label="Port";Expression={$_.Port}}, @{Label="State";Expression={$_.State}}, @{Label="When";Expression={$_.Time}} -AutoSize
 } else {
-    Write-Host "No open ports found."
+    Write-Host "Brak otwartych portów."
 }
